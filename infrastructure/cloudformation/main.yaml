@@ -1,0 +1,151 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >
+  Provision Windows Server 2022 EC2 with IIS
+  using AWS CloudFormation.
+
+Parameters:
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    Description: EC2 instance typeY
+
+  AllowedHttpCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to access HTTP
+
+Resources:
+
+  DemoVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.10.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: windows-demo-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DemoVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.10.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DemoVPC
+
+  InternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP access
+      VpcId: !Ref DemoVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedHttpCidr
+
+  EC2SSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2SSMRole
+
+  WindowsWebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub
+        - '{{resolve:ssm:${AmiParameter}}}'
+        - AmiParameter: /aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup
+      Tags:
+        - Key: Name
+          Value: windows-dotnet-webserver
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          $ErrorActionPreference = "Stop"
+
+          Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+
+          New-Item -ItemType Directory `
+            -Path "C:\inetpub\wwwroot" `
+            -Force
+
+          Set-Content `
+            -Path "C:\inetpub\wwwroot\index.html" `
+            -Value "<h1>AWS Windows Server IIS is Ready</h1>"
+
+          Set-Service -Name W3SVC -StartupType Automatic
+          Start-Service -Name W3SVC
+          </powershell>
+
+Outputs:
+
+  InstanceId:
+    Description: Windows EC2 instance ID
+    Value: !Ref WindowsWebServer
+
+  PublicIP:
+    Description: Public IP address
+    Value: !GetAtt WindowsWebServer.PublicIp
+
+  WebsiteURL:
+    Description: Website URL
+    Value: !Sub 'http://${WindowsWebServer.PublicDnsName}'
+
+  VpcId:
+    Value: !Ref DemoVPC
+
+  SubnetId:
+    Value: !Ref PublicSubnet
